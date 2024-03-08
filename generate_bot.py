@@ -5,7 +5,6 @@ from utils import generate_response
 import pandas as pd
 import pickle
 from utils import encode_rag, cosine_sim_rag, top_candidates
-from nltk.tokenize import word_tokenize
 
 
 class ChatBot:
@@ -52,18 +51,17 @@ class ChatBot:
             bot_cosine_scores, initial_data=self.scripts
         )
 
-        if top_scores[0] >= 0.85:
+        if top_scores[0] >= 0.89:
             for index in top_indexes:
                 rag_answer = self.scripts.iloc[index]["answer"]
-                print(f"rag_answer: {rag_answer}")
 
             answer = generate_response(
                 model=self.generative_model,
                 tokenizer=self.generative_tokenizer,
                 question=utterance,
                 context=self.conversation_history,
-                top_p=0.95,
-                temperature=1,
+                top_p=0.9,
+                temperature=0.95,
                 rag_answer=rag_answer,
             )
         else:
