@@ -2,11 +2,14 @@ import pandas as pd
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from scipy import sparse
+import pickle
 
 
 def scripts_rework(path, character):
-    """this functions split scripts for queation, answer, context,
-    picks up the cahracter and saves data in pickle format"""
+    """FOR GENERARTIVE MODEL TRAINING!!!
+    this functions split scripts for question, answer, context,
+    picks up the character, augments data for generative model training
+    and saves data in pickle format"""
 
     df = pd.read_csv(path)
 
@@ -65,11 +68,69 @@ def scripts_rework(path, character):
     scripts.to_pickle("data/scripts_reworked.pkl")
 
 
+# ===================================================
+def scripts_rework_ranking(path, character):
+    """FOR RAG RETRIEVAL !!!!
+    this functions split scripts for queation, answer, context,
+    picks up the cahracter and saves data in pickle format"""
+
+    df = pd.read_csv(path)
+
+    # split data for scenes
+    count = 0
+    df["scene_count"] = ""
+    for index, row in df.iterrows():
+        if index == 0:
+            df.iloc[index]["scene_count"] = count
+        elif row["person_scene"] == "Scene":
+            count += 1
+            df.iloc[index]["scene_count"] = count
+        else:
+            df.iloc[index]["scene_count"] = count
+
+    df = df.dropna().reset_index()
+
+    # rework scripts to filer by caracter utterances and related context
+    scripts = pd.DataFrame()
+    for index, row in df.iterrows():
+        if (row["person_scene"] == character) & (
+            df.iloc[index - 1]["person_scene"] != "Scene"
+        ):
+            context = []
+            for i in reversed(range(2, 5)):
+                if (df.iloc[index - i]["person_scene"] != "Scene") & (index - i >= 0):
+                    context.append(df.iloc[index - i]["dialogue"])
+                else:
+                    break
+            new_row = {
+                "answer": row["dialogue"],
+                "question": df.iloc[index - 1]["dialogue"],
+                "context": context,
+            }
+
+            scripts = pd.concat([scripts, pd.DataFrame([new_row])])
+
+        elif (row["person_scene"] == character) & (
+            df.iloc[index - 1]["person_scene"] == "Scene"
+        ):
+            context = []
+            new_row = {"answer": row["dialogue"], "question": "", "context": context}
+            scripts = pd.concat([scripts, pd.DataFrame([new_row])])
+    # load reworked data to pkl
+    scripts = scripts[scripts["question"] != ""]
+    scripts = scripts.reset_index(drop=True)
+    scripts.to_pickle("data/scripts.pkl")
+
+
+# ===================================================
 def encode(texts, model, contexts=None, do_norm=True):
     """function to encode texts for cosine similarity search"""
 
     question_vectors = model.encode(texts)
-    context_vectors = model.encode(contexts)
+    if type(contexts) is list:
+        context_vectors = model.encode("".join(contexts))
+    else:
+        context_vectors = model.encode(contexts)
 
     return np.concatenate(
         [
@@ -80,9 +141,52 @@ def encode(texts, model, contexts=None, do_norm=True):
     )
 
 
+def encode_rag(texts, model, contexts=None, do_norm=True):
+    """function to encode texts for cosine similarity search"""
+
+    question_vectors = model.encode(texts)
+    context_vectors = model.encode("".join(contexts))
+
+    return np.concatenate(
+        [
+            np.asarray(context_vectors),
+            np.asarray(question_vectors),
+        ],
+        axis=-1,
+    )
+
+
+# ===================================================
+def encode_df_save(model):
+    """FOR RAG RETRIEVAL DATABASE
+    this functions vectorizes reworked scripts and loads them to
+    pickle file to be used as retrieval base for ranking script"""
+
+    scripts_reopened = pd.read_pickle("data/scripts.pkl")
+    vect_data = []
+    for index, row in scripts_reopened.iterrows():
+        if type(row["context"]) is list:
+            vect = encode(
+                texts=row["question"],
+                model=model,
+                contexts="".join(row["context"]),
+            )
+            vect_data.append(vect)
+        else:
+            vect = encode(
+                texts=row["question"],
+                model=model,
+                contexts=row["context"],
+            )
+            vect_data.append(vect)
+    with open("data/scripts_vectors.pkl", "wb") as f:
+        pickle.dump(vect_data, f)
+
+
+# ===================================================
 def cosine_sim(answer_true_vectros, answer_generated_vectors) -> list:
-    """returns list of tuples with similarity score and
-    script index in initial dataframe"""
+    """FOR MODEL EVALUATION!!!!
+    returns list of tuples with similarity score"""
 
     data_emb = sparse.csr_matrix(answer_true_vectros)
     query_emb = sparse.csr_matrix(answer_generated_vectors)
@@ -90,21 +194,37 @@ def cosine_sim(answer_true_vectros, answer_generated_vectors) -> list:
     return similarity[0]
 
 
-def reranking_score(question, context, answer, model):
-    """this function applies trained bert classifier to identified candidates
-      and returns their updated rank"""
-    combined_text = ''.join(context) + " [SEP] " + question + " [SEP] " + answer
+# ===================================================
+def cosine_sim_rag(data_vectors, query_vectors) -> list:
+    """FOR RAG RETRIEVAL RANKS!!!
+    returns list of tuples with similarity score and
+    script index in initial dataframe"""
 
-    prediction = model(combined_text)
-    if prediction[0]["label"] == "LABEL_0":
-        reranked_score = prediction[0]["score"]
-        return reranked_score
-    else:
-        return 0
+    data_emb = sparse.csr_matrix(data_vectors)
+    query_emb = sparse.csr_matrix(query_vectors)
+    similarity = cosine_similarity(query_emb, data_emb).flatten()
+    ind = np.argwhere(similarity)
+    match = sorted(zip(similarity, ind.tolist()), reverse=True)
+
+    return match
 
 
-def generate_response(model, tokenizer, question, context, top_p, temperature):
-    combined = "context: " + ''.join(context) + "</s>" + "question: " + question
+# ===================================================
+def generate_response(
+    model,
+    tokenizer,
+    question,
+    context,
+    top_p,
+    temperature,
+    rag_answer="",
+):
+
+    combined = (
+        "context:" + rag_answer +
+        "".join(context) + "</s>" +
+        "question: " + question
+    )
     input_ids = tokenizer.encode(combined, return_tensors="pt")
     sample_output = model.generate(
         input_ids,
@@ -126,14 +246,11 @@ def generate_response(model, tokenizer, question, context, top_p, temperature):
     return out
 
 
-def reranking_output(beam_answers_lst, question, context, model):
-    """this function applies trained bert classifier to generated candidates and
-    returns the one with max rank"""
-    score_lst = []
-    for beam_answer in beam_answers_lst:
-        reranker_score = reranking_score(
-            question=question, context=context, answer=beam_answer, model=model
-        )
+# ===================================================
+def top_candidates(score_lst_sorted, initial_data, top=1):
+    """this functions receives results of the cousine similarity ranking and
+    returns top items' scores and their indices"""
 
-        score_lst.append(reranker_score)
-    return beam_answers_lst[score_lst.index(max(score_lst))]
+    scores = [item[0] for item in score_lst_sorted]
+    candidates_indexes = [item[1][0] for item in score_lst_sorted]
+    return scores[0:top], candidates_indexes[0:top]

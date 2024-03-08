@@ -10,13 +10,13 @@ chatSheldon.load()
 
 
 @app.route("/")
-def index():
+async def index():
     return render_template("chat.html")
 
 
 async def sleep():
-    await asyncio.sleep(1)
-    return 1
+    await asyncio.sleep(0.1)
+    return 0.1
 
 
 @app.route("/get", methods=["GET", "POST"])
